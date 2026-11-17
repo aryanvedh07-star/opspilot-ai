@@ -58,7 +58,7 @@ def ask_model(prompt, context=""):
             "For risky actions, recommend human approval. Do not expose secrets.\n\n"
             f"CONTEXT:\n{context[:18000]}\n\nTASK:\n{prompt}"
         )
-        response = client.models.generate_content(model="gemini-2.5-flash", contents=full_prompt)
+        response = client.models.generate_content(model="gemini-3.8-flash", contents=full_prompt)
         text = getattr(response, "text", None)
         if not text:
             return None, "The model returned an empty response. Try a shorter request."
