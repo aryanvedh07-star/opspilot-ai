@@ -41,8 +41,11 @@ def log_event(action, status, details):
     })
 
 def get_api_key():
-    key = st.session_state.get("gemini_key", "").strip()
-    return key
+    try:
+        saved_key = st.secrets.get("GEMINI_API_KEY", "")
+    except Exception:
+        saved_key = ""
+    return (saved_key or st.session_state.get("gemini_key", "")).strip()
 
 def ask_model(prompt, context=""):
     key = get_api_key()
