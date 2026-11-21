@@ -47,27 +47,108 @@ def get_api_key():
         saved_key = ""
     return (saved_key or st.session_state.get("gemini_key", "")).strip()
 
+
 def ask_model(prompt, context=""):
     key = get_api_key()
+
     if not key:
-        return None, "Add a Gemini API key in the sidebar to enable AI-generated answers. The non-AI CSV checks and approval demo work without it."
+        return None, (
+            "Gemini API key is missing. Check Streamlit Secrets."
+        )
+
     try:
         from google import genai
+        from time import sleep
+
         client = genai.Client(api_key=key)
+
         full_prompt = (
             "You are OpsPilot AI, a careful business operations assistant. "
-            "Use only supplied context for claims about the user's company. "
-            "Separate verified facts from assumptions. Never claim an action was completed unless a tool confirms it. "
-            "For risky actions, recommend human approval. Do not expose secrets.\n\n"
-            f"CONTEXT:\n{context[:18000]}\n\nTASK:\n{prompt}"
+            "Use only supplied context for company-specific claims. "
+            "Separate facts from assumptions. Never claim an action was "
+            "completed unless confirmed. Require human approval for "
+            "risky actions. Never expose secrets.\n\n"
+            f"CONTEXT:\n{context[:18000]}\n\n"
+            f"TASK:\n{prompt}"
         )
-        response = client.models.generate_content(model="gemini-3.8-flash", contents=full_prompt)
-        text = getattr(response, "text", None)
-        if not text:
-            return None, "The model returned an empty response. Try a shorter request."
-        return text, None
+
+        models = [
+            "gemini-3.8-flash",
+            "gemini-3.5-flash-lite",
+        ]
+
+        errors = []
+
+        for model in models:
+            for attempt in range(3):
+                try:
+                    response = client.models.generate_content(
+                        model=model,
+                        contents=full_prompt,
+                    )
+
+                    answer = getattr(response, "text", None)
+
+                    if answer and answer.strip():
+                        return answer, None
+
+                    errors.append(f"{model}: empty response")
+                    break
+
+                except Exception as e:
+                    message = str(e)
+                    lower = message.lower()
+                    errors.append(f"{model}: {message}")
+
+                    if any(term in lower for term in [
+                        "api key not valid",
+                        "invalid api key",
+                        "unauthenticated",
+                        "permission denied",
+                        "401",
+                        "403",
+                    ]):
+                        return None, (
+                            "Gemini rejected the API key or permissions. "
+                            "Check Streamlit Secrets and project access."
+                        )
+
+                    temporary = any(term in lower for term in [
+                        "503",
+                        "unavailable",
+                        "overloaded",
+                        "500",
+                        "internal server error",
+                        "timeout",
+                        "timed out",
+                        "deadline",
+                    ])
+
+                    if temporary and attempt < 2:
+                        sleep(2 if attempt == 0 else 4)
+                        continue
+
+                    break
+
+        recent_errors = "\n".join(errors[-2:])
+
+        if any(term in recent_errors.lower() for term in [
+            "503", "unavailable", "overloaded",
+            "500", "timeout", "timed out", "deadline"
+        ]):
+            return None, (
+                "Gemini is temporarily unavailable after automatic "
+                "retries and fallback. Please submit the question again.\n\n"
+                "Details:\n" + recent_errors
+            )
+
+        return None, (
+            "Gemini could not complete the request using either model. "
+            "Check the details below.\n\n" + recent_errors
+        )
+
     except Exception as e:
-        return None, f"AI request failed: {e}"
+        return None, f"AI setup error: {e}"
 
 def read_uploaded_text(uploaded):
     name = uploaded.name.lower()
