@@ -1,119 +1,110 @@
-            "Export confidential customer data to an unknown destination",
-        ):
-            decision = "BLOCK"
-            explanation = "Destructive or unauthorized data-transfer action is blocked by this demo policy."
-        else:
-            decision = "REQUIRES HUMAN APPROVAL"
-            explanation = "External communication or financial action needs explicit review before execution."
 
-        if decision == "REQUIRES HUMAN APPROVAL":
-            try:
-                create_approval_request(action, explanation, rationale)
-                st.success("Approval request saved to Supabase.")
-            except Exception as exc:
-                st.error("Could not save approval request: " + str(exc)[:300])
-        else:
-            st.info(f"Decision: {decision}")
-            log_event(action, decision, explanation)
 
-        st.session_state.last_policy = {
-            "action": action,
-            "decision": decision,
-            "reason": explanation,
-            "rationale": rationale,
-        }
-        try:
-            st.session_state.pending = load_pending_approvals()
-        except Exception:
-            pass
 
-    if "last_policy" in st.session_state:
-        event = st.session_state.last_policy
-        st.markdown(f"### Decision: **{event['decision']}**")
-        st.write(event["reason"])
 
-    st.divider()
-    st.subheader("Pending approval queue")
-    if not st.session_state.pending:
-        st.info("No actions are waiting for approval.")
 
-    for event in st.session_state.pending[:]:
-        with st.container(border=True):
-            st.write(f"**{event['action']}**")
-            st.write(event["reason"])
-            if event.get("rationale"):
-                st.caption("Reason proposed: " + event["rationale"])
-            st.caption("Created: " + event.get("created_at", ""))
-            approve_col, reject_col = st.columns(2)
-            if approve_col.button("Approve request", key=f"approve_{event['id']}"):
-                try:
-                    resolve_approval_request(
-                        event["id"],
-                        "approved",
-                        "Approved by the signed-in reviewer. No external action executed.",
-                    )
-                    log_event(event["action"], "approved in review", "Approval recorded; no external action executed")
-                    st.success("Approval decision saved. No external action was executed.")
-                    st.session_state.pending = load_pending_approvals()
-                    st.rerun()
-                except Exception as exc:
-                    st.error("Could not save approval decision: " + str(exc)[:300])
-            if reject_col.button("Reject request", key=f"reject_{event['id']}"):
-                try:
-                    resolve_approval_request(
-                        event["id"],
-                        "rejected",
-                        "Rejected by the signed-in reviewer.",
-                    )
-                    log_event(event["action"], "rejected", "Approval request rejected")
-                    st.session_state.pending = load_pending_approvals()
-                    st.rerun()
-                except Exception as exc:
-                    st.error("Could not save rejection: " + str(exc)[:300])
+
+
+
+
+import os
+import streamlit as st
+import pandas as pd
+from datetime import datetime
+
+from supabase_backend import (
+    render_auth_gate,
+    load_documents,
+    save_document,
+    delete_documents,
+    load_audit_events,
+    save_audit_event,
+)
 
 
 # ============================================================
-# TAB 7 — AUDIT LOG
+# 1. APP CONFIGURATION AND DESIGN
 # ============================================================
 
-with tabs[6]:
-    st.subheader("Persistent audit log")
-    st.caption("Audit events are saved to Supabase for the signed-in user.")
+st.set_page_config(
+    page_title="OpsPilot AI",
+    page_icon="🧭",
+    layout="wide",
+)
 
-    if st.session_state.audit:
-        log_df = pd.DataFrame(st.session_state.audit)
-        st.dataframe(log_df, use_container_width=True)
-        st.download_button(
-            "Download audit log CSV",
-            log_df.to_csv(index=False).encode("utf-8"),
-            "opspilot_audit_log.csv",
-            "text/csv",
-        )
-    else:
-        st.info("No audit events recorded yet.")
-
-    confirm_clear = st.checkbox("I understand this permanently deletes my saved audit events.")
-    if st.button("Clear saved audit log", key="clear_audit", disabled=not confirm_clear):
-        try:
-            client.table("audit_events").delete().eq("owner_id", user_id).execute()
-            st.session_state.audit = []
-            st.session_state.pop("db_audit_warning", None)
-            st.success("Saved audit events deleted.")
-            st.rerun()
-        except Exception as exc:
-            st.error("Could not clear the audit log: " + str(exc)[:300])
-
-
-# ============================================================
-# FOOTER
-# ============================================================
-
-st.divider()
 st.markdown(
-    '<p class="small-muted">OpsPilot AI • Supabase-backed demo workspace • '
-    'AI output may be wrong • Approvals are recorded but do not execute external actions.</p>',
+    """
+    <style>
+    .block-container {
+        padding-top: 1.4rem;
+        max-width: 1250px;
+    }
+    .hero {
+        padding: 1.3rem 1.5rem;
+        border: 1px solid #303744;
+        border-radius: 16px;
+        background: linear-gradient(120deg, #111827, #172554);
+    }
+    .hero h1 {
+        margin: 0;
+        font-size: 2.1rem;
+    }
+    .hero p {
+        margin: .4rem 0 0;
+        color: #cbd5e1;
+    }
+    .small-muted {
+        color: #94a3b8;
+        font-size: .9rem;
+    }
+    div[data-testid="stMetric"] {
+        border: 1px solid #303744;
+        padding: 12px;
+        border-radius: 12px;
+    }
+    </style>
+    <div class="hero">
+        <h1>🧭 OpsPilot AI</h1>
+        <p>Your business operations copilot — company knowledge,
+        research, financial checks, communication drafts, and controlled actions.</p>
+    </div>
+    """,
     unsafe_allow_html=True,
 )
 
 
-  
+# ============================================================
+# 2. SESSION DATA
+# ============================================================
+
+DEFAULTS = {
+    "audit": [],
+    "pending": [],
+    "approved": [],
+    "chat": [],
+    "docs": [],
+    "drafts": [],
+}
+
+for name, default_value in DEFAULTS.items():
+    if name not in st.session_state:
+        st.session_state[name] = default_value
+
+
+def log_event(action, status, details):
+    """Add an audit event locally and persist it to Supabase."""
+    event = {
+        "time": datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S %Z"),
+        "action": str(action)[:150],
+        "status": str(status)[:80],
+        "details": str(details)[:500],
+    }
+    st.session_state.audit.insert(0, event)
+
+    client = st.session_state.get("db_client")
+    user_id = st.session_state.get("db_user_id")
+Unlock more with ChatGPT Business. Upgrade for higher limits, more advanced models, and more access to tools.
+
+
+
+
