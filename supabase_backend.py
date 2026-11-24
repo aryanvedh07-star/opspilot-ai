@@ -201,11 +201,26 @@ def render_auth_gate():
                             "Account request received. If email confirmation is enabled, verify "
                             "your email, then return to the Sign in tab."
                         )
-                except Exception:
-                    st.error(
-                        "Account creation failed. Check the email, password requirements, "
-                        "and Supabase Auth settings."
-                    )
+               except Exception as exc:
+    message = str(exc) or "No error message returned."
+
+    # Never expose credentials or personal information.
+    for secret in (key, new_password, new_email.strip()):
+        if secret:
+            message = message.replace(secret, "[REDACTED]")
+
+    error_code = getattr(exc, "code", None)
+    status_code = getattr(exc, "status_code", None)
+
+    st.error("Account creation failed. Actual error details:")
+
+    st.caption(
+        f"Error type: {type(exc).__name__} | "
+        f"HTTP status: {status_code or 'Not provided'} | "
+        f"Error code: {error_code or 'Not provided'}"
+    )
+
+    st.code(message[:600])
 
     return None, None, None
 
