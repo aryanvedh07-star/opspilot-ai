@@ -2,7 +2,7 @@
 
 This module is designed for a Streamlit app using Supabase Auth + RLS.
 Only the publishable/anon key is used. Never put a Supabase secret/service-role
-key in Streamlit client-facing code or in GitHub.
+key in client-facing code or in GitHub.
 """
 
 from __future__ import annotations
@@ -22,7 +22,6 @@ def _read_config() -> tuple[str, str]:
     except Exception:
         url, key = "", ""
 
-    # Render and other hosts commonly configure these as environment variables.
     url = url or os.environ.get("SUPABASE_URL", "").strip()
     key = key or os.environ.get("SUPABASE_PUBLISHABLE_KEY", "").strip()
     return url, key
@@ -46,9 +45,12 @@ def _activate_session(client: Any, user: Any, session: Any) -> None:
     """Store the authenticated client in the current Streamlit user's session."""
     if not user or not getattr(user, "id", None) or not session:
         raise ValueError("Supabase did not return an active user session.")
+
     st.session_state["supabase_client"] = client
     st.session_state["supabase_user_id"] = str(user.id)
-    st.session_state["supabase_user_email"] = str(getattr(user, "email", "") or "")
+    st.session_state["supabase_user_email"] = str(
+        getattr(user, "email", "") or ""
+    )
 
 
 def _create_client(url: str, key: str):
@@ -83,13 +85,45 @@ def ensure_workspace(client: Any, user_id: str) -> str:
         )
         if result.data:
             return str(result.data[0]["id"])
+
         raise RuntimeError("Workspace was not returned after creation.")
+
     except Exception as exc:
         raise RuntimeError(
-            "Supabase login succeeded, but the workspace could not be read or created. "
-            "Verify that the seven tables and their RLS policies exist. "
+            "Supabase login succeeded, but the workspace could not be read "
+            "or created. Verify the seven tables and their RLS policies. "
             f"Details: {str(exc)[:300]}"
         ) from exc
+
+
+def _safe_auth_error(exc: Exception, key: str, email: str = "", password: str = "") -> str:
+    """Return a useful auth error while redacting credentials and PII."""
+    message = str(exc) or "No error message returned."
+    for secret in (key, password, email.strip()):
+        if secret:
+            message = message.replace(secret, "[REDACTED]")
+
+    code = getattr(exc, "code", None)
+    status = getattr(exc, "status_code", None)
+    details = getattr(exc, "details", None)
+    hint = getattr(exc, "hint", None)
+
+    # These fields are typically safe error metadata, but redact defensively.
+    extra = []
+    if code:
+        extra.append(f"code={code}")
+    if status:
+        extra.append(f"http_status={status}")
+    if details:
+        extra.append(f"details={str(details)[:250]}")
+    if hint:
+        extra.append(f"hint={str(hint)[:250]}")
+
+    for secret in (key, password, email.strip()):
+        if secret:
+            extra = [item.replace(secret, "[REDACTED]") for item in extra]
+
+    return (message[:500] + (("\n" + " | ".join(extra)) if extra else ""))[:750]
 
 
 def render_auth_gate():
@@ -101,8 +135,8 @@ def render_auth_gate():
     url, key = _read_config()
     if not url or not key:
         st.error(
-            "Supabase settings are missing. In this test app, open Settings → Secrets "
-            "and define SUPABASE_URL and SUPABASE_PUBLISHABLE_KEY."
+            "Supabase settings are missing. Configure SUPABASE_URL and "
+            "SUPABASE_PUBLISHABLE_KEY in the host environment."
         )
         st.stop()
 
@@ -124,10 +158,14 @@ def render_auth_gate():
                         return None, None, None
 
                     st.session_state["supabase_workspace_id"] = workspace_id
+
                     with st.sidebar:
                         st.caption(
                             "Signed in as "
-                            + (st.session_state.get("supabase_user_email") or "user")
+                            + (
+                                st.session_state.get("supabase_user_email")
+                                or "user"
+                            )
                         )
                         if st.button("Sign out", key="supabase_signout"):
                             try:
@@ -137,21 +175,33 @@ def render_auth_gate():
                                 st.session_state.pop("docs", None)
                                 st.session_state.pop("audit", None)
                                 st.rerun()
+
                     return client, str(user_id), workspace_id
+
         except Exception:
             # Expired or invalid auth session: return to the sign-in form.
             _clear_auth_state()
 
     st.subheader("Sign in to OpsPilot AI")
-    st.caption("Use a dedicated demo account. Do not upload confidential company data yet.")
+    st.caption(
+        "Use a dedicated demo account. Do not upload confidential company data yet."
+    )
 
     login_tab, signup_tab = st.tabs(["Sign in", "Create account"])
 
     with login_tab:
         with st.form("supabase_signin_form", clear_on_submit=False):
             email = st.text_input("Email", key="supabase_login_email")
-            password = st.text_input("Password", type="password", key="supabase_login_password")
-            submitted = st.form_submit_button("Sign in", type="primary", use_container_width=True)
+            password = st.text_input(
+                "Password",
+                type="password",
+                key="supabase_login_password",
+            )
+            submitted = st.form_submit_button(
+                "Sign in",
+                type="primary",
+                use_container_width=True,
+            )
 
         if submitted:
             if not email.strip() or not password:
@@ -165,18 +215,31 @@ def render_auth_gate():
                     })
                     _activate_session(client, result.user, result.session)
                     st.rerun()
-                except Exception:
-                    st.error(
-                        "Sign-in failed. Check your email/password and whether email verification "
-                        "is complete. No password or key was logged."
-                    )
+
+                except Exception as exc:
+                    st.error("Sign-in failed. Check the details below.")
+                    st.code(_safe_auth_error(exc, key, email, password))
 
     with signup_tab:
-        with st.form("supabase_signup_form", clear_on_submit=True):
-            new_email = st.text_input("Email address", key="supabase_signup_email")
-            new_password = st.text_input("Create password (at least 8 characters)", type="password", key="supabase_signup_password")
-            confirm_password = st.text_input("Confirm password", type="password", key="supabase_signup_confirm")
-            signed_up = st.form_submit_button("Create account", use_container_width=True)
+        with st.form("supabase_signup_form", clear_on_submit=False):
+            new_email = st.text_input(
+                "Email address",
+                key="supabase_signup_email",
+            )
+            new_password = st.text_input(
+                "Create password (at least 8 characters)",
+                type="password",
+                key="supabase_signup_password",
+            )
+            confirm_password = st.text_input(
+                "Confirm password",
+                type="password",
+                key="supabase_signup_confirm",
+            )
+            signed_up = st.form_submit_button(
+                "Create account",
+                use_container_width=True,
+            )
 
         if signed_up:
             if not new_email.strip():
@@ -192,40 +255,39 @@ def render_auth_gate():
                         "email": new_email.strip(),
                         "password": new_password,
                     })
-                    if getattr(result, "session", None) and getattr(result, "user", None):
+
+                    if (
+                        getattr(result, "session", None)
+                        and getattr(result, "user", None)
+                    ):
                         _activate_session(client, result.user, result.session)
                         st.success("Account created. Opening your workspace…")
                         st.rerun()
                     else:
                         st.success(
-                            "Account request received. If email confirmation is enabled, verify "
-                            "your email, then return to the Sign in tab."
+                            "Account request received. If email confirmation "
+                            "is enabled, verify your email, then return to Sign in."
                         )
-               except Exception as exc:
-    message = str(exc) or "No error message returned."
 
-    # Never expose credentials or personal information.
-    for secret in (key, new_password, new_email.strip()):
-        if secret:
-            message = message.replace(secret, "[REDACTED]")
-
-    error_code = getattr(exc, "code", None)
-    status_code = getattr(exc, "status_code", None)
-
-    st.error("Account creation failed. Actual error details:")
-
-    st.caption(
-        f"Error type: {type(exc).__name__} | "
-        f"HTTP status: {status_code or 'Not provided'} | "
-        f"Error code: {error_code or 'Not provided'}"
-    )
-
-    st.code(message[:600])
+                except Exception as exc:
+                    st.error("Account creation failed. Supabase returned:")
+                    st.code(
+                        _safe_auth_error(
+                            exc,
+                            key,
+                            new_email,
+                            new_password,
+                        )
+                    )
 
     return None, None, None
 
 
-def load_documents(client: Any, user_id: str, workspace_id: str) -> list[dict[str, str]]:
+def load_documents(
+    client: Any,
+    user_id: str,
+    workspace_id: str,
+) -> list[dict[str, str]]:
     """Load the user's documents and reconstruct content from ordered chunks."""
     result = (
         client.table("documents")
@@ -235,6 +297,7 @@ def load_documents(client: Any, user_id: str, workspace_id: str) -> list[dict[st
         .order("created_at")
         .execute()
     )
+
     docs: list[dict[str, str]] = []
     for row in result.data or []:
         chunk_result = (
@@ -245,17 +308,30 @@ def load_documents(client: Any, user_id: str, workspace_id: str) -> list[dict[st
             .order("chunk_index")
             .execute()
         )
-        text = "".join(item.get("content", "") for item in (chunk_result.data or []))
+        text = "".join(
+            item.get("content", "")
+            for item in (chunk_result.data or [])
+        )
         docs.append({"name": row["filename"], "text": text})
+
     return docs
 
 
-def save_document(client: Any, user_id: str, workspace_id: str, filename: str, content: str) -> None:
+def save_document(
+    client: Any,
+    user_id: str,
+    workspace_id: str,
+    filename: str,
+    content: str,
+) -> None:
     """Upsert document metadata and replace its searchable text chunks."""
     clean_name = str(filename).strip()[:250]
     clean_content = str(content)[:20000]
+
     if not clean_name or not clean_content.strip():
-        raise ValueError("A document filename and readable content are required.")
+        raise ValueError(
+            "A document filename and readable content are required."
+        )
 
     digest = hashlib.sha256(clean_content.encode("utf-8")).hexdigest()
 
@@ -278,15 +354,24 @@ def save_document(client: Any, user_id: str, workspace_id: str, filename: str, c
         .limit(1)
         .execute()
     )
+
     if not doc_result.data:
-        raise RuntimeError("Document metadata saved, but its ID could not be retrieved.")
+        raise RuntimeError(
+            "Document metadata saved, but its ID could not be retrieved."
+        )
 
     document_id = str(doc_result.data[0]["id"])
-    client.table("document_chunks").delete().eq("document_id", document_id).execute()
 
-    # Small, ordered chunks are the foundation for later source-aware RAG.
+    client.table("document_chunks").delete().eq(
+        "document_id", document_id
+    ).execute()
+
     chunk_size = 3500
-    chunks = [clean_content[i:i + chunk_size] for i in range(0, len(clean_content), chunk_size)]
+    chunks = [
+        clean_content[i:i + chunk_size]
+        for i in range(0, len(clean_content), chunk_size)
+    ]
+
     records = [
         {
             "owner_id": user_id,
@@ -297,16 +382,31 @@ def save_document(client: Any, user_id: str, workspace_id: str, filename: str, c
         }
         for index, chunk in enumerate(chunks)
     ]
+
     if records:
         client.table("document_chunks").insert(records).execute()
 
 
-def delete_documents(client: Any, user_id: str, workspace_id: str) -> None:
+def delete_documents(
+    client: Any,
+    user_id: str,
+    workspace_id: str,
+) -> None:
     """Delete document metadata; the database cascade removes its chunks."""
-    client.table("documents").delete().eq("owner_id", user_id).eq("workspace_id", workspace_id).execute()
+    (
+        client.table("documents")
+        .delete()
+        .eq("owner_id", user_id)
+        .eq("workspace_id", workspace_id)
+        .execute()
+    )
 
 
-def load_audit_events(client: Any, user_id: str, limit: int = 200) -> list[dict[str, str]]:
+def load_audit_events(
+    client: Any,
+    user_id: str,
+    limit: int = 200,
+) -> list[dict[str, str]]:
     """Load recent persisted audit events in the shape used by the current UI."""
     result = (
         client.table("audit_events")
@@ -316,20 +416,32 @@ def load_audit_events(client: Any, user_id: str, limit: int = 200) -> list[dict[
         .limit(limit)
         .execute()
     )
+
     events: list[dict[str, str]] = []
     for row in result.data or []:
         details = row.get("details") or {}
-        summary = details.get("summary", "") if isinstance(details, dict) else str(details)
+        summary = (
+            details.get("summary", "")
+            if isinstance(details, dict)
+            else str(details)
+        )
         events.append({
             "time": str(row.get("created_at", "")),
             "action": str(row.get("action", "")),
             "status": str(row.get("status", "")),
             "details": str(summary)[:500],
         })
+
     return events
 
 
-def save_audit_event(client: Any, user_id: str, action: str, status: str, details: Any) -> None:
+def save_audit_event(
+    client: Any,
+    user_id: str,
+    action: str,
+    status: str,
+    details: Any,
+) -> None:
     """Persist one audit event without storing credentials."""
     summary = str(details or "")[:500]
     client.table("audit_events").insert({
